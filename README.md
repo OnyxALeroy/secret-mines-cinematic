@@ -1,4 +1,4 @@
-# secret-mines-cinematic
+# Purple Haze
 
 A WebGL shader visualization project that renders real-time graphics using GLSL shaders.
 

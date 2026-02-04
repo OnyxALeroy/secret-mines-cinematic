@@ -47,19 +47,6 @@ vec2 getPath(float z) {
     return vec2(sin(z * 0.1) * 4.0, 0.0);
 }
 
-vec2 getLanternAngles(float lanternIndex, float time) {
-    float rndPhase = hash(lanternIndex * 13.0 + 41.0);
-    float rndSpeed = 0.8 + 0.4 * hash(lanternIndex * 7.0 + 99.0);
-    float rndAmp = 0.8 + 0.4 * hash(lanternIndex * 23.0 + 5.0);
-
-    float t = time * 2.0 * rndSpeed + rndPhase * 100.0;
-
-    float a1 = sin(t) * 0.2 * rndAmp;
-    float a2 = sin(t - 0.8) * 0.25 * rndAmp;
-
-    return vec2(a1, a2);
-}
-
 // -------------------------------------------------------------------------
 // SDF PRIMITIVES
 // -------------------------------------------------------------------------
@@ -103,15 +90,29 @@ float sdCappedCylinder(vec3 p, float h, float r) {
 }
 
 // -------------------------------------------------------------------------
+// PHYSICS SIMULATION HELPER
+// -------------------------------------------------------------------------
+vec2 getLanternAngles(float lanternIndex, float time) {
+    float rndPhase = hash(lanternIndex * 13.0 + 41.0);
+    float rndSpeed = 0.8 + 0.4 * hash(lanternIndex * 7.0 + 99.0);
+    float rndAmp = 0.8 + 0.4 * hash(lanternIndex * 23.0 + 5.0);
+
+    float t = time * 2.0 * rndSpeed + rndPhase * 100.0;
+
+    float a1 = sin(t) * 0.2 * rndAmp;
+    float a2 = sin(t - 0.8) * 0.25 * rndAmp;
+
+    return vec2(a1, a2);
+}
+
+// -------------------------------------------------------------------------
 // SCENE MAPPING
 // -------------------------------------------------------------------------
 
-vec2 map(vec3 p) {
+// --- [ADDED] MAP STATIC: Calculates only static geometry for shadows ---
+float mapStatic(vec3 p) {
     vec2 pathOffset = getPath(p.z);
-    vec3 pGlobal = p;
-
-    // 1. WORLD GEOMETRY
-    p.x -= pathOffset.x;
+    p.x -= pathOffset.x; // Apply Bending
 
     float dWall = 2.5 - abs(p.x);
     float dFloor = p.y - (-1.5);
@@ -128,18 +129,60 @@ vec2 map(vec3 p) {
     vec3 pPillar = vec3(abs(p.x) - 2.5, p.y, zLocal);
     float dPillar = length(pPillar.xz) - 0.55;
 
+    float d = dFloor;
+    if(dCeil < d) d = dCeil;
+    if(dWall < d) d = dWall;
+    if(dPillar < d) d = dPillar;
+
+    return d;
+}
+
+// --- MAIN MAP: Includes everything ---
+vec2 map(vec3 p) {
+    vec2 pathOffset = getPath(p.z);
+    vec3 pGlobal = p;
+
+    // BEND WORLD (Applied to p for all subsequent logic)
+    p.x -= pathOffset.x;
+
+    // Static Geometry
+    float dWall = 2.5 - abs(p.x);
+    float dFloor = p.y - (-1.5);
+
+    float baseCeilH = 3.8 - 0.2 * p.x * p.x;
+    float zRepeat = 6.0;
+    float zRibDist = abs(mod(p.z, zRepeat) - 3.0);
+    float ribH = smoothstep(0.3, 0.2, zRibDist) * 0.15;
+    float spineH = smoothstep(0.3, 0.2, abs(p.x)) * 0.12;
+    float finalCeilH = baseCeilH - max(ribH, spineH);
+    float dCeil = finalCeilH - p.y;
+
+    float zLocal = mod(p.z, zRepeat) - zRepeat * 0.5;
+    vec3 pPillar = vec3(abs(p.x) - 2.5, p.y, zLocal);
+    float dPillar = length(pPillar.xz) - 0.55;
+
+    float d = dFloor;
+    float id = ID_FLOOR;
+
+    if(dCeil < d) { d = dCeil; id = ID_CEILING; }
+    if(dWall < d) { d = dWall; id = ID_WALL; }
+    if(dPillar < d) { d = dPillar; id = ID_PILLAR; }
+
     // --- DECORATION LOGIC ---
     float lSpacing = 12.0;
     float lIndex = floor((pGlobal.z + lSpacing*0.5) / lSpacing);
     float lCenterZ = lIndex * lSpacing;
 
     vec2 lPath = getPath(lCenterZ);
-    vec3 pL_Global = pGlobal;
-    pL_Global.z -= lCenterZ;
-    float sideSignL = (pL_Global.x > lPath.x) ? 1.0 : -1.0;
+    // Use bent 'p' for X positioning relative to wall
+    vec3 pDecor = p;
+    // Use unbent global Z for spacing logic
+    pDecor.z = pGlobal.z - lCenterZ;
 
-    vec3 pMountL = pL_Global;
-    pMountL.x -= lPath.x + sideSignL * 2.5;
+    float sideSignL = (pDecor.x > 0.0) ? 1.0 : -1.0;
+
+    vec3 pMountL = pDecor;
+    pMountL.x -= sideSignL * 2.5;
     pMountL.y -= 1.0;
 
     float dLanternMetal = MAX_DIST;
@@ -184,19 +227,15 @@ vec2 map(vec3 p) {
         float cageH = 0.25;
         vec3 pCage = pL; pCage.y += roofH + cageH * 0.5;
 
-        // 1. THE CORE
         dLanternCore = sdHexPrism(pCage, vec2(0.12, cageH * 0.5));
 
-        // 2. THE VERTICAL BARS (Cylinders)
         vec3 pBars = pCage;
         float angle = atan(pBars.z, pBars.x);
         float radius = length(pBars.xz);
         float sector = PI / 3.0;
         float aLocal = mod(angle + sector * 0.5, sector) - sector * 0.5;
-
         vec2 barPos = vec2(radius * cos(aLocal), radius * sin(aLocal));
         barPos.x -= 0.145;
-
         float dFrameBars = length(barPos) - 0.015;
         dFrameBars = max(dFrameBars, abs(pBars.y) - (cageH * 0.5 + 0.02));
 
@@ -204,8 +243,6 @@ vec2 map(vec3 p) {
         float dBase = sdHexPrism(pBase, vec2(0.15, 0.01));
 
         float dLanternFrameAll = min(dTopRing, min(dRoof3D, min(dBase, dFrameBars)));
-
-        // 3. THE SUBTRACTION
         float dInnerCut = sdHexPrism(pCage, vec2(0.115, cageH * 0.48));
         dLanternFrameAll = max(dLanternFrameAll, -dInnerCut);
 
@@ -216,13 +253,12 @@ vec2 map(vec3 p) {
     float mIndex = floor(((pGlobal.z + 6.0) + lSpacing*0.5) / lSpacing);
     float mCenterZ = mIndex * lSpacing - 6.0;
 
-    vec3 pMir_Local = p;
-    pMir_Local.z -= mCenterZ;
+    vec3 pMir = p; // Uses bent p
+    pMir.z = pGlobal.z - mCenterZ;
 
     float dMirror = MAX_DIST;
     {
-        vec3 pMir = pMir_Local;
-        pMir.y -= 0.0;
+        pMir.y -= 0.0; // Eye Level
 
         float wallDist = abs(pMir.x) - 2.5;
         pMir.x = wallDist + 0.15;
@@ -239,13 +275,6 @@ vec2 map(vec3 p) {
         dLanternMetal = min(dLanternMetal, dMirrorFrame);
         dMirror = dMirBody;
     }
-
-    float d = dFloor;
-    float id = ID_FLOOR;
-
-    if(dCeil < d) { d = dCeil; id = ID_CEILING; }
-    if(dWall < d) { d = dWall; id = ID_WALL; }
-    if(dPillar < d) { d = dPillar; id = ID_PILLAR; }
 
     if(dLanternMetal < d) { d = dLanternMetal; id = ID_CHAIN; }
     if(dLanternCore < d) { d = dLanternCore; id = ID_LANTERN_CORE; }
@@ -278,6 +307,20 @@ vec2 rayMarch(vec3 ro, vec3 rd, int maxSteps) {
         if(dO > MAX_DIST) break;
     }
     return vec2(dO, matId);
+}
+
+// --- [ADDED] SOFT SHADOW FUNCTION ---
+// Uses mapStatic() instead of map() to ignore Lanterns
+float softShadow(vec3 ro, vec3 rd, float mint, float maxt, float k) {
+    float res = 1.0;
+    float t = mint;
+    for(int i = 0; i < 32; i++) {
+        float h = mapStatic(ro + rd * t); // Query STATIC only
+        res = min(res, k * h / t);
+        t += h;
+        if(res < 0.001 || t > maxt) break;
+    }
+    return clamp(res, 0.0, 1.0);
 }
 
 vec3 getNormal(vec3 p) {
@@ -392,7 +435,7 @@ vec3 getMovingLightPos(float lCenterZ, float sideSign) {
 
 vec3 getLighting(vec3 p, vec3 n, vec3 rd, float id) {
     if(id == ID_LANTERN_CORE) {
-        return vec3(0.6, 0.1, 1.0) * 6.0;
+        return vec3(0.4, 0.05, 0.8) * 6.0;
     }
     if(id == ID_CHAIN || id == ID_LANTERN_FRAME) return vec3(0.005);
 
@@ -413,7 +456,6 @@ vec3 getLighting(vec3 p, vec3 n, vec3 rd, float id) {
     }
     else if (id == ID_WALL) {
         texVal = getWallTexture(p);
-        // Slightly brighter base for walls
         col = vec3(0.06, 0.05, 0.07) * texVal;
         matSpec = 0.05 * texVal;
     }
@@ -445,7 +487,15 @@ vec3 getLighting(vec3 p, vec3 n, vec3 rd, float id) {
             float dist = length(lDir);
             lDir = normalize(lDir);
 
+            // --- [ADDED] SHADOW CALCULATION ---
+            float shadow = 1.0;
+            if (dist < 20.0) {
+                // Use softShadow with k=8.0 and mapStatic to avoid lantern self-shadows
+                shadow = softShadow(p, lDir, 0.05, dist, 8.0);
+            }
+
             float att = 1.0 / (1.0 + dist * 0.5 + dist * dist * 1.0);
+
             if(att > 0.001) {
                 float diff = max(dot(n, lDir), 0.0);
 
@@ -453,11 +503,11 @@ vec3 getLighting(vec3 p, vec3 n, vec3 rd, float id) {
                 float specPow = (id == ID_MIRROR) ? 128.0 : 16.0;
                 float spec = pow(max(dot(ref, -rd), 0.0), specPow);
 
-                // INTENSIFIED LIGHT (2.5x)
-                vec3 lightColor = vec3(0.55, 0.1, 1.0) * 2.5;
+                vec3 lightColor = vec3(0.35, 0.05, 0.7) * 2.5;
 
-                totalLight += lightColor * diff * att;
-                totalSpec += lightColor * spec * att * matSpec;
+                // Shadow multiplies light contribution
+                totalLight += lightColor * diff * att * shadow;
+                totalSpec += lightColor * spec * att * matSpec * shadow;
             }
         }
     }
